@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8"/>
+    <title>WebGL光线追踪</title>
+
+    <script id="vshader" type="x-shader/x-vertex">
+        attribute vec2 vPosition;
+        varying vec2 fPosition;
+
+        void main() {
+            fPosition = vPosition;
+            gl_Position = vec4(vPosition, 0.0, 1.0);
+        }
+    </script>
+
+    <script id="fshader" type="x-shader/x-fragment">
+precision highp float;
+varying vec2 fPosition;
+
+const int maxObjCnt = 10;
+const int maxReflectionCnt = 20;
+
+uniform float alpha;
+uniform float img;
+// 更改反射次数可以得到不同的效果
+uniform float reflections;
+const float focalLength = 2.0; // 相机焦距
+const float PI = 3.14159265358979323846264;
+
+
+struct Box {
+    vec3 leftBottom;
+    vec3 rightTop;
+    vec3 hit;
+    vec3 color;
+    float reflectivity;
+};
+
+
+struct Sphere {
+    vec3 center;
+    float radius;
+    vec3 color;
+    float reflectivity;
+};
+
+struct Plane {
+    vec3 point;
+    vec3 normal;
+    vec3 color;
+    float reflectivity;
+};
+
+struct Ray {
+    vec3 origin;// 源
+    vec3 direction;// 方向
+    float intensity;// 强度
+};
+
+struct Light {
+    vec3 position;// 光源位置
+    vec3 ambient;// 环境光
+    vec3 diffuse;// 漫反射
+    vec3 specular;// 镜面反射
+    float lightsize;// 光源尺寸(球型光源,强度与距离的平方成反比)
+};
+
+struct RayAndColor {
+    Ray reflectedRay;
+    vec3 color;
+};
+
+Light light;
+Light lights[9];
+Sphere spheres[maxObjCnt];
+Plane planes[maxObjCnt];
+Box boxes[maxObjCnt];
+int numSpheres = 0, numPlanes = 0, numBoxes = 0;
+vec3 lightPosDelta[9];
+//添加光源的扰动
+//float random(float x)
+//{
+//    return fract(sin(x) * 100000.0) / 300.0;
+//}
+//
+//vec3 lightRandomPosition(in Light light, in vec3 seed) {
+//    return light.position + vec3(0.0, random(seed.z), 0.0);
+//}
+//绕z轴旋转
+mat4 rotateZ(float theta) {
+    float c = cos(theta);
+    float s = sin(theta);
+    return mat4(
+        c, s, 0.0, 0.0,
+        -s, c, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 0.0, 1.0
+    );
+}
+//矩阵转置
+mat4 translate(vec3 offset) {
+    return mat4(
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0,
+        offset.x, offset.y, offset.z, 1.0
+    );
+}
+// 设置场景
+void scene1() {
+    light.position = vec3(0.8 + 0.8 * sin(alpha * 4.0 * PI), 1.3, 0.2);
+    // 光源采样
+    for (int i = 0; i < 9; i++) {
+        lights[i].position = light.position + lightPosDelta[i];
+    }
+    numSpheres = 4;
+    numPlanes = 6;
+    numBoxes = 2;
+
+
+    boxes[0].color = vec3(0.1, 1.0, 1.1);
+    boxes[0].reflectivity = 0.1;
+    boxes[0].leftBottom = vec3(0.0, -1.0, -1.0);
+    boxes[0].rightTop = vec3(1.0, -0.0, -0.0);
+
+    boxes[1].color = vec3(1.0, 1.0, 1.0);
+    boxes[1].reflectivity = 0.0;
+    boxes[1].leftBottom = vec3(-1.0, -1.0, -1.0);
+    boxes[1].rightTop = vec3(0.0, 1.2, -0.0);
+
+    spheres[0].color = vec3(1.5, 1.2, 0.0);
+    spheres[0].reflectivity = 0.2;
+    spheres[0].center = vec3(1.5, -0.5, -0.5);
+    spheres[0].radius = 0.5;
+
+    spheres[1].color = vec3(1.0, 1.0, 1.0);
+    spheres[1].reflectivity = 0.5;
+    spheres[1].center = vec3(0.5, 0.5, -0.5);
+    spheres[1].radius = 0.5;
+
+    spheres[2].color = vec3(0.3, 0.8, 0.8);
+    spheres[2].reflectivity = 0.1;
+    spheres[2].center = vec3(-0.5, -0.5, 0.5);
+    spheres[2].radius = 0.5;
+
+    spheres[3].color = vec3(1.0, 1.0, 1.0);
+    spheres[3].reflectivity = 0.5;
+    spheres[3].center = vec3(0.75, -0.6, 0.4);
+    spheres[3].radius = 0.4;
+
+    planes[0].color = vec3(1.0, 0.0, 0.0);
+    planes[0].reflectivity = 0.0;
+    planes[0].point = vec3(-1.0, 0.0, 0.0);
+    planes[0].normal = normalize(-planes[0].point);
+
+    planes[1].color = vec3(0.0, 1.0, 0.0);
+    planes[1].reflectivity = 0.0;
+    planes[1].point = vec3(0.0, -1.0, 0.0);
+    planes[1].normal = normalize(-planes[1].point);
+
+    planes[2].color = vec3(0.0, 0.4, 1.0);
+    planes[2].reflectivity = 0.0;
+    planes[2].point = vec3(0.0, 0.0, -1.0);
+    planes[2].normal = vec3(0.0, 0.0, 1.0);
+
+    planes[3].color = vec3(1.0, 0.0, 1.0);
+    planes[3].reflectivity = 0.0;
+    planes[3].point = vec3(2.0, 0.0, 0.0);
+    planes[3].normal = vec3(-1.0, 0.0, 0.0);
+
+    planes[4].color = normalize(vec3(255.0, 126.0, 0.0));
+    planes[4].reflectivity = 0.0;
+    planes[4].point = vec3(0.0, 2.0, 0.0);
+    planes[4].normal = normalize(-planes[4].point);
+
+    planes[5].color = vec3(0.0, 0.0, 1.0);
+    planes[5].reflectivity = 0.0;
+    planes[5].point = vec3(0.0, 0.0, 4.0);
+    planes[5].normal = vec3(0.0, 0.0, -1.0);
+}
+
+void scene2() {
+    light.position = vec3(-0.7 * sin(alpha * 2.0 * PI), 0.7 * cos(alpha * 2.0 * PI), 1.3 + 0.7 * sin(alpha * 2.0 * PI));
+    // 光源采样
+    for (int i = 0; i < 9; i++) {
+        lights[i].position = light.position + lightPosDelta[i];
+    }
+    numSpheres = 5;
+    numPlanes = 1;
+    numBoxes = 1;
+
+    boxes[0].color = normalize(vec3(249, 104, 126));
+    boxes[0].reflectivity = 0.8;
+    boxes[0].leftBottom = vec3(-0.25, 0.40, -1.0);
+    boxes[0].rightTop = vec3(0.25, 0.8, 0.3);
+
+    spheres[0].color = normalize(vec3(0, 107, 176));
+    spheres[0].reflectivity = 0.4;
+    spheres[0].center = vec3(0.0, 0.0, 0.0);
+    spheres[0].radius = 0.25;
+
+    spheres[1].color = normalize(vec3(239, 169, 13));
+    spheres[1].reflectivity = 0.4;
+    spheres[1].center = vec3(0.95 * 0.5 + 0.1, 0.0, 0.0);
+    spheres[1].radius = 0.25;
+
+    spheres[2].color = normalize(vec3(29, 24, 21));
+    spheres[2].reflectivity = 0.4;
+    spheres[2].center = vec3(0.588 * 0.5 + 0.1, -1.009 * 0.5, 0.0);
+    spheres[2].radius = 0.25;
+
+    spheres[3].color = normalize(vec3(5, 147, 65));
+    spheres[3].reflectivity = 0.4;
+    spheres[3].center = vec3(-0.588 * 0.5 - 0.1, -1.009 * 0.5, 0.0);
+    spheres[3].radius = 0.25;
+
+    spheres[4].color = normalize(vec3(220, 47, 31));
+    spheres[4].reflectivity = 0.4;
+    spheres[4].center = vec3(-0.95 * 0.5 - 0.1, 0.0, 0.0);
+    spheres[4].radius = 0.25;
+
+
+
+    mat4 rotMat = rotateZ(0.0);
+
+    planes[0].color = vec3(0.6, 0.7, 0.8);
+    planes[0].reflectivity = 0.4;
+    planes[0].point = vec3(0.0, 0.0, -1.0);//(rotMat * vec4(0.3, 0.0, -1.0, 1.0)).xyz;
+    planes[0].normal = normalize(-planes[0].point);
+}
+
+void scene3() {
+    light.position = (vec3(-1.5, 1.5, 1.0));
+    // 光源采样
+    for (int i = 0; i < 9; i++) {
+        lights[i].position = light.position + lightPosDelta[i];
+    }
+    numSpheres = 3;
+    numPlanes = 1;
+    numBoxes = 2;
+
+    vec4 origin = vec4(0.0, 0.0, 0.0, 1.0);
+    vec3 offset1 = vec3(0.8, -0.3, 0.0);
+    mat4 circle1 = rotateZ(-alpha * 2.0 * PI) * translate(offset1);
+    vec3 offset2 = vec3(0.2, 0.4, 0.0);
+    mat4 circle2 = rotateZ(alpha * 4.0 * PI) * translate(offset2);
+
+    spheres[0].color = vec3(0.5, 0.7, 0.0);
+    spheres[0].reflectivity = 0.8;
+    spheres[0].center = (origin).xyz - vec3(0.0, 0.0, 0.2);
+    spheres[0].radius = 0.18;
+
+    spheres[1].color = vec3(0.3, 0.4, 0.8);
+    spheres[1].reflectivity = 0.8;
+    spheres[1].center = (circle1 * origin).xyz;
+    spheres[1].radius = 0.14;
+
+    spheres[2].color = vec3(0.8, 0.2, 0.2);
+    spheres[2].reflectivity = 0.8;
+    spheres[2].center = (circle2 * origin).xyz;
+    spheres[2].radius = 0.10;
+
+    boxes[0].color = vec3(0.8, 0.4, 0.0);
+    boxes[0].reflectivity = 0.8;
+    boxes[0].leftBottom = vec3(0.6 * sin(6.0 * PI * alpha), 0.0, -0.8);
+    boxes[0].rightTop = vec3(0.7 + 0.6 * sin(6.0 * PI * alpha), 0.6, -0.6);
+
+    boxes[1].color = vec3(0.0, 0.4, 0.8);
+    boxes[1].reflectivity = 0.8;
+    boxes[1].leftBottom = vec3(-0.8, -0.8, -1.0);
+    boxes[1].rightTop = vec3(-0.2, -0.2, -0.4);
+
+    planes[0].color = vec3(0.2, 0.5, 0.6);
+    planes[0].reflectivity = 0.3;
+    planes[0].point = vec3(0.0, 0.0, -1.0);
+    planes[0].normal = vec3(0.0, 0.0, 1.0);
+}
+
+void initScene() {
+    light.ambient = vec3(0.2, 0.2, 0.2);
+    light.diffuse = vec3(0.8, 0.8, 0.8);
+    light.specular = vec3(0.95, 0.95, 0.95);
+    light.lightsize = 0.05;
+    for (int i = 0; i < 9; i++) {
+        lights[i].ambient = light.ambient;
+        lights[i].diffuse = light.diffuse;
+        lights[i].specular = light.specular;
+        lights[i].lightsize = light.lightsize;
+    }
+    if (img < 1.1) {
+        scene1();
+    } else if (img < 2.1) {
+        scene2();
+    } else if (img < 3.1) {
+        scene3();
+    }
+}
+
+
+/*
+    光线表示: y = Dt + O,D为单位向量
+    三种相交检测,返回结果均为光源到交点的t值
+    t值小于0代表不相交
+*/
+// 检测和球体是否相交
+float checkIntersectSphere(Sphere sphere, Ray ray) {
+    vec3 dis = (ray.origin - sphere.center);
+    float B = -2.0 * dot(ray.direction, dis);
+    float delta = B * B - 4.0 * (dot(dis, dis) - sphere.radius * sphere.radius);
+    float t = 0.0;
+    if (delta > 0.0) {
+        float temp = abs(sqrt(delta));
+        t = (B - temp) / 2.0;
+    }
+    if (delta == 0.0) {
+        t = B / 2.0;
+    }
+    return t;
+}
+//检测和长方体是否相交
+float checkIntersectBox(inout Box box, Ray ray) {
+    vec3 invdir = 1.0 / ray.direction;
+    vec3 tmin = (box.leftBottom - ray.origin) * invdir;
+    vec3 tmax = (box.rightTop - ray.origin) * invdir;
+    vec3 t1 = min(tmin, tmax);
+    vec3 t2 = max(tmin, tmax);
+    float tNear = max(max(t1.x, t1.y), t1.z);
+    float tFar = min(min(t2.x, t2.y), t2.z);
+    if (tNear > tFar) {
+        return -1.0;
+    } else {
+        // 可以确定相交
+        vec3 dis = tNear * ray.direction;
+        vec3 judge1 = abs(ray.origin + dis - box.leftBottom);
+        vec3 judge2 = abs(ray.origin + dis - box.rightTop);
+        box.hit = vec3(0.0, 0.0, 0.0);
+        if (judge1.z < 0.00001) {
+            box.hit = vec3(0.0, 0.0, -1.0);
+        } else if (judge1.y < 0.00001) {
+            box.hit = vec3(0.0, -1.0, 0.0);
+        } else if (judge1.x < 0.00001) {
+            box.hit = vec3(-1.0, 0.0, 0.0);
+        } else if (judge2.z < 0.00001) {
+            box.hit = vec3(0.0, 0.0, 1.0);
+        } else if (judge2.y < 0.00001) {
+            box.hit = vec3(0.0, 1.0, 0.0);
+        } else if (judge2.x < 0.00001) {
+            box.hit = vec3(1.0, 0.0, 0.0);
+        } else {
+            return -1.0;
+        }
+        return tNear;
+    }
+}
+
+// 检测和平面是否相交
+float checkIntersectPlane(Plane plane, Ray ray) {
+    float up = dot(plane.point - ray.origin, plane.normal);
+    float down = dot(ray.direction, plane.normal);
+    if (down == 0.0 || down == -0.0) return 0.0;
+    return up / down;
+}
+
+// 之前是否已经有光线到达
+bool intersectsBeforeLight(Ray ray, in Light light) {
+    float distanceToLight = distance(ray.origin, light.position);
+
+    // Spheres
+    for (int i = 0; i < maxObjCnt; i++) {
+        if (i >= numSpheres) break;
+        float t = checkIntersectSphere(spheres[i], ray);
+        if (t > 0.0 && t < distanceToLight) {
+            return true;
+        }
+    }
+
+    // Planes
+    for (int i = 0; i < maxObjCnt; i++) {
+        if (i >= numPlanes) break;
+        float t = checkIntersectPlane(planes[i], ray);
+        if (t > 0.0 && t < distanceToLight) {
+            return true;
+        }
+    }
+
+    // Boxes
+    for (int i = 0; i < maxObjCnt; i++) {
+        if (i >= numBoxes) break;
+        float t = checkIntersectBox(boxes[i], ray);
+        if (t > 0.0 && t < distanceToLight) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+
+// 追踪光线并返回反射光
+RayAndColor traceRay(Ray ray) {
+
+    // 相交测试,找到最近的物体
+    float minT = 999999.0;
+    int intersectObjType = 0;//0,1,2,3代表无,球,平面,长方体
+    Sphere sphere;
+    Plane plane;
+    Box box;
+
+    for (int i = 0; i < maxObjCnt; i++) {
+        if (i >= numSpheres) break;
+        float t = checkIntersectSphere(spheres[i], ray);
+        if (t > 0.0 && t < minT) {
+            minT = t;
+            sphere = spheres[i];
+            intersectObjType = 1;
+        }
+    }
+
+    for (int i = 0; i < maxObjCnt; i++) {
+        if (i >= numBoxes) break;
+        float t = checkIntersectBox(boxes[i], ray);
+        if (t > 0.0 && t < minT) {
+            minT = t;
+            box = boxes[i];
+            intersectObjType = 3;
+        }
+    }
+
+    for (int i = 0; i < maxObjCnt; i++) {
+        if (i >= numPlanes) break;
+        float t = checkIntersectPlane(planes[i], ray);
+        if (t > 0.0 && t < minT) {
+            minT = t;
+            plane = planes[i];
+            intersectObjType = 2;
+        }
+    }
+
+    // 计算反射
+    RayAndColor rayTracer;
+    vec3 color = vec3(0.0, 0.0, 0.0);
+    if (intersectObjType > 0) {
+        // 得到相交物体的参数
+        vec3 surfacePoint = ray.origin + (minT * ray.direction);
+        vec3 surfaceNormal;
+        vec3 objColor;
+        float reflectivity;
+        if (intersectObjType == 1) {
+            surfaceNormal = normalize(surfacePoint - sphere.center);
+            objColor = sphere.color;
+            reflectivity = sphere.reflectivity;
+        } else if (intersectObjType == 2) {
+            surfaceNormal = plane.normal;
+            objColor = plane.color;
+            reflectivity = plane.reflectivity;
+        } else if (intersectObjType == 3) {
+            surfaceNormal = box.hit;
+            objColor = box.color;
+            reflectivity = box.reflectivity;
+        }
+        for (int i = 0; i < 9; i++) {
+            // 添加环境光
+            color += lights[i].ambient * objColor;
+            vec3 lightPos = lights[i].position;//lightRandomPosition(light,surfacePoint);
+            vec3 L = normalize(lightPos - surfacePoint);
+            float d = length(ray.origin - surfacePoint);
+            float lightArea = 4.0 * PI * lights[i].lightsize * lights[i].lightsize;
+            float decrease = (d * d) / lightArea;
+            Ray shadowRay;
+            shadowRay.origin = surfacePoint + 0.00001 * L;
+            shadowRay.direction = L;
+            // 检测阴影
+            if (!intersectsBeforeLight(shadowRay, lights[i])) {
+                vec3 N = surfaceNormal;
+                // 漫反射光
+                color += lights[i].diffuse * objColor * max(0.0, dot(L, N));
+                // 直射光
+                float shininess = 20.0;
+                vec3 R = reflect(-L, N);
+                vec3 C = normalize(ray.origin - surfacePoint);
+                float specular = pow(max(dot(R, C), 0.0), shininess);
+                color += lights[i].specular * specular * reflectivity / decrease;
+            }
+        }
+        color /= 9.0;
+        // 反射光线
+        Ray reflectionRay;
+        vec3 reflection = reflect(ray.direction, surfaceNormal);
+        reflectionRay.origin = surfacePoint + 0.00001 * reflection;
+        reflectionRay.direction = reflection;
+        reflectionRay.intensity = ray.intensity * reflectivity;
+        rayTracer.reflectedRay = reflectionRay;
+    }
+    rayTracer.color = color * ray.intensity;
+
+    return rayTracer;
+}
+
+
+void main() {
+    if (img < 1.1) {
+        lightPosDelta[0] = vec3(0.03, 0.0, 0.0);
+        lightPosDelta[1] = vec3(0.0, 0.03, 0.0);
+        lightPosDelta[2] = vec3(0.03, 0.03, 0.00);
+        lightPosDelta[3] = vec3(0.00, 0.00, 0.0);
+        lightPosDelta[4] = vec3(-0.03, 0.0, 0.0);
+        lightPosDelta[5] = vec3(0.0, -0.03, 0.0);
+        lightPosDelta[6] = vec3(-0.03, -0.03, 0.0);
+        lightPosDelta[7] = vec3(0.03, -0.03, 0.0);
+        lightPosDelta[8] = vec3(-0.03, 0.03, 0.0);
+    } else if (img < 2.1) {
+        lightPosDelta[0] = vec3(0.015, 0.0, 0.0);
+        lightPosDelta[1] = vec3(0.0, 0.015, 0.0);
+        lightPosDelta[2] = vec3(0.01, 0.01, 0.00);
+        lightPosDelta[3] = vec3(0.00, 0.00, 0.0);
+        lightPosDelta[4] = vec3(-0.015, 0.0, 0.0);
+        lightPosDelta[5] = vec3(0.0, -0.015, 0.0);
+        lightPosDelta[6] = vec3(-0.01, -0.01, 0.0);
+        lightPosDelta[7] = vec3(0.01, -0.01, 0.0);
+        lightPosDelta[8] = vec3(-0.01, 0.01, 0.0);
+    } else {
+        lightPosDelta[0] = vec3(0.03, 0.0, 0.0);
+        lightPosDelta[1] = vec3(0.0, 0.03, 0.0);
+        lightPosDelta[2] = vec3(0.03, 0.03, 0.00);
+        lightPosDelta[3] = vec3(0.00, 0.00, 0.0);
+        lightPosDelta[4] = vec3(-0.03, 0.0, 0.0);
+        lightPosDelta[5] = vec3(0.0, -0.03, 0.0);
+        lightPosDelta[6] = vec3(-0.03, -0.03, 0.0);
+        lightPosDelta[7] = vec3(0.03, -0.03, 0.0);
+        lightPosDelta[8] = vec3(-0.03, 0.03, 0.0);
+    }
+    initScene();
+    Ray currRay;
+    currRay.origin = vec3(0.0, 0.0, focalLength);
+    currRay.direction = normalize(vec3(fPosition, -focalLength));
+    currRay.intensity = 1.0;
+    if (img < 2.1) {
+        currRay.intensity = 0.8;
+    }
+    if (img < 1.1) {
+        currRay.origin += vec3(0.0, 0.0, 2.0);
+    }
+    //计算颜色
+    vec3 color = vec3(0.0, 0.0, 0.0);
+    for (int i = 0; i <= maxReflectionCnt; i++) {
+        if (i > int(reflections)) break;
+        RayAndColor rayTracer = traceRay(currRay);
+        color += rayTracer.color;
+        currRay = rayTracer.reflectedRay;
+    }
+    gl_FragColor = vec4(color, 1.0);
+}
+
+    </script>
+
+    <script src="lib/webgl-utils.js"></script>
+    <script src="lib/initShaders.js"></script>
+    <script src="lib/MV.js"></script>
+    <script src="main.js"></script>
+</head>
+
+<body onload="main()" style="text-align:center;">
+<div style="display: inline-flex;">
+    <div style="padding: 16px; margin: auto;">
+        <h2>WebGL实现光线追踪</h2>
+        <h3>20373918 宋鸿堃</h3>
+        <br>
+        <label for="image">选择场景:</label>
+        <select name="image" id="image">
+            <option value="1">场景1:球体与盒子叠放在长方形空间中</option>
+            <option value="2">场景2:多个球体与长方体之间的映射</option>
+            <option value="3">场景3:移动的球体与长方体</option>
+        </select>
+        <br>
+        <label for="reflect">选择反射次数:</label>
+        <select name="reflect" id="reflect">
+            <option value="3">反射3次</option>
+            <option value="1">反射1次</option>
+            <option value="2">反射2次</option>
+            <option value="4">反射4次</option>
+            <option value="4">反射5次</option>
+            <option value="4">反射7次</option>
+            <option value="4">反射10次</option>
+        </select>
+    </div>
+    <canvas width="1000" height="1000"></canvas>
+</div>
+
+</body>
+
+</html>
